@@ -78,7 +78,7 @@ if ($steam) {                                                   # pre-select the
     $libs.Add($steam)
     $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
     if (Test-Path $vdf) {
-        foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s+"([^"]+)"')) { $libs.Add($m.Groups[1].Value -replace '\\\\', '\') }
+        foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s+"([^"]+)"')) { $libs.Add(($m.Groups[1].Value -replace '\\\\', '\')) }
     }
     foreach ($lib in $libs) {
         $cand = Join-Path $lib "steamapps\common\Outlast"
