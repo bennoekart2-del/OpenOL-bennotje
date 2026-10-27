@@ -13,9 +13,13 @@
 param(
     [Parameter(Mandatory)][string]$Exe,
     [Parameter(Mandatory)][string]$Out,
-    [string]$Blob = (Join-Path $PSScriptRoot "..\exe-patch\olfix.json")
+    [string]$Blob = ""
 )
 $ErrorActionPreference = "Stop"
+if (-not $Blob) {                                       # resolved here, not as a parameter default: Windows PowerShell 5.1 leaves $PSScriptRoot empty there
+    $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $Blob = Join-Path $here "..\exe-patch\olfix.json"
+}
 
 $j      = Get-Content -Raw $Blob | ConvertFrom-Json          # code, entries and the site table (built from sites.json)
 $EXPECT = $j.input_sha256                              # OLGame.exe of OpenOL 2.1.0, Outlast Steam build 576074
