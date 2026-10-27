@@ -1,7 +1,8 @@
 """Host side of the patch's data area (see exe-patch/sites.json "layout"): read the counters and set the kill switch of a running client.
 
   python -I olmail.py <pid> [<pid> ...]                 print the data area of each client
-  python -I olmail.py <pid> disable one_owner|none      set or clear the one-owner kill switch (a twin without swapping exes)
+  python -I olmail.py <pid> disable one_owner|triggers|none   set a kill switch (a twin without swapping exes): the one-owner rule or the trigger distance rule
+  python -I olmail.py <pid> radius <units>             set the trigger distance rule's radius (0 = the default 3000)
   python -I olmail.py <pid> load <checkpoint> [<persistent level>]   load a checkpoint through the patch's mailbox (no mouse, no overlay)
 
 The area is part of the patched exe's own section (writable); only these few u32 fields are ever written, from outside, by this tool.
@@ -38,6 +39,13 @@ def set_disable(pid, mask):
     return p.wr(p.base + CAVE + OFF + LAY["disable"], struct.pack("<I", mask))
 
 
+def set_radius(pid, units):
+    """The trigger distance rule's radius (exe-patch v6), stored squared as f32 bits; 0 restores the default."""
+    p = census.Proc(pid, write=True)
+    bits = 0 if units <= 0 else struct.unpack("<I", struct.pack("<f", float(units) * float(units)))[0]
+    return p.wr(p.base + CAVE + OFF + LAY["trig_radius_sq"], struct.pack("<I", bits))
+
+
 def send_load(pid, name, persist="", timeout=15.0):
     """Ask the patched game to load a checkpoint (the overlay's loader, run from a per-frame hook). Returns (res_code, seconds) or (None, seconds) on a timeout.
     The test writes the argument first and cmd_seq last; the game answers by copying cmd_seq to res_seq."""
@@ -70,8 +78,10 @@ if __name__ == "__main__":
     if len(a) >= 3 and a[1] == "load":
         print(send_load(int(a[0]), a[2], a[3] if len(a) > 3 else ""))
     elif len(a) == 3 and a[1] == "disable":
-        ok = set_disable(int(a[0]), {"one_owner": 1, "none": 0}[a[2]])
+        ok = set_disable(int(a[0]), {"one_owner": 1, "triggers": 8, "none": 0}[a[2]])
         print("written" if ok else "write failed")
+    elif len(a) == 3 and a[1] == "radius":
+        print("written" if set_radius(int(a[0]), float(a[2])) else "write failed")
     else:
         for pid in map(int, a):
             print(json.dumps(read(pid)))

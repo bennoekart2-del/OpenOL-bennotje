@@ -1,3 +1,26 @@
+# Outlast Co-op: play Outlast with a friend
+
+**[⬇ Download the installer (OutlastCoop-Installer.zip)](https://github.com/bennoekart2-del/OpenOL-bennotje/releases/latest/download/OutlastCoop-Installer.zip)**
+
+**You need:** Windows and Outlast on Steam **with the Whistleblower DLC**. Every player needs their own copy of the game.
+
+1. Download the zip above and unzip it, for example to your Desktop.
+2. Double-click **`INSTALL-OUTLAST-COOP.bat`**. If Windows asks whether to run it, click *More info* and then *Run anyway*.
+3. In the first window, select your Outlast folder. The Steam folder is usually already selected, so just click OK.
+4. In the second window, choose where the co-op copy should go (it needs about 6.5 GB). Your Steam game is never changed.
+5. Answer two questions: are you hosting, and what is your name. A friend who joins types the host's IP address.
+6. Start **Outlast Co-op** from your desktop.
+
+**To play together:**
+- Both of you join the same free virtual LAN, such as [Radmin VPN](https://www.radmin-vpn.com/), ZeroTier or Tailscale. The joining player uses the host's address from that app.
+- **The host:** press **F6**, open the **Relay** tab, click **Start Relay**, close the overlay with F6, then go to **Multiplayer > Connect**.
+- **The friend:** go to **Multiplayer > Connect**.
+- When the corner of the screen says **"2 players"**, both of you choose **New Game**.
+
+What works: both players see each other, doors, enemies (one copy each), damage, death and respawn, shared checkpoint loads, and story events that wait until you are near them. More details are in [tools/outlast-coop](tools/outlast-coop/README.md). This is a fan project built on [OpenOL](https://github.com/ShyKiss/OpenOL) and the [G3RKA fork](https://github.com/G3RKA/OpenOL).
+
+---
+
 # OpenOL — Modified client of Outlast Game
 
 <p align="center">

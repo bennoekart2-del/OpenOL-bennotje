@@ -29,6 +29,9 @@ same class closer than 150 units can be merged by mistake; both players should u
 
 ## Use (short)
 
+Easiest: download this repository (Code > Download ZIP), unzip it, double-click `INSTALL-OUTLAST-COOP.bat` and answer two questions. It does steps 1 to 4
+below for you (see `play/README.md`). By hand:
+
 1. Copy your Outlast install (needs the Whistleblower DLC), install the OpenOL 2.1.0 release over the copy. Never touch the Steam folder itself.
 2. Everyone: `play\apply-native-patch.ps1 -Exe <copy>\Binaries\Win64\OLGame.exe -Out OLGame_patched.exe`, keep the original, put the patched exe in the copy.
 3. Host: build the relay (see `relay-patches/README.md`) or use the release `OpenOL_Relay`, then `play\host.ps1 -Relay <OpenOL_Relay.exe>`; forward UDP 7777 or use a VPN network. Room `PUBLIC`.
@@ -46,5 +49,6 @@ Read the unverified list in [harness/README.md](harness/README.md) before trusti
 
 ## Not done
 
-Shared checkpoint loads (loading a checkpoint on one machine does not carry the partner), story triggers by position (the relay radius filter only
-softens it), pickups and pushable objects in a real game (protocol-tested only), a play session over the internet.
+Pickups and pushable objects in a real game (protocol-tested only), a play session over the internet. Shared checkpoint loads are in the exe patch since v5
+(`harness/shared_cp_live.py` SC1 to SC5 PASS). Story triggers that wait until your hero is near them are in v6 (game-free `exe-patch/emutest.py` 18/18 PASS;
+`harness/trigger_near_live.py` with real clients **not run yet**).

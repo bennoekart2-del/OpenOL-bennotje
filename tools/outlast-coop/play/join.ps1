@@ -26,8 +26,11 @@ if (-not (Test-Path $exe)) { throw "No Binaries\Win64\OLGame.exe in '$GameDir'. 
 if (($GameDir -match "steamapps") -and -not $Force) {
     throw "'$GameDir' looks like a Steam library folder. Copy the game to another folder and use that copy (or pass -Force)."
 }
+$patched = ""                                                     # the same exe with ..\exe-patch applied
+$blob = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "..\exe-patch\olfix.json"
+if (Test-Path $blob) { $patched = (Get-Content -Raw $blob | ConvertFrom-Json).output_sha256 }
 $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
-if ($hash -ne $known) {
+if ($hash -ne $known -and $hash -ne $patched) {
     Write-Warning "OLGame.exe does not match OpenOL 2.1.0 on Steam build 576074 (SHA-256 $hash). Is OpenOL installed over this copy, and is it the same game build?"
 }
 if ($Name -match "[=\r\n]" -or $Password -match "[\r\n]") { throw "Name/Password must not contain '=' or line breaks." }
