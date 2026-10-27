@@ -46,5 +46,6 @@ Read the unverified list in [harness/README.md](harness/README.md) before trusti
 
 ## Not done
 
-Shared checkpoint loads (loading a checkpoint on one machine does not carry the partner), story triggers by position (the relay radius filter only
-softens it), pickups and pushable objects in a real game (protocol-tested only), a play session over the internet.
+Pickups and pushable objects in a real game (protocol-tested only), a play session over the internet. Shared checkpoint loads are in the exe patch since v5
+(`harness/shared_cp_live.py` SC1 to SC5 PASS). Story triggers that wait until your hero is near them are in v6 (game-free `exe-patch/emutest.py` 18/18 PASS;
+`harness/trigger_near_live.py` with real clients **not run yet**).

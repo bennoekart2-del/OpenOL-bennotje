@@ -37,6 +37,7 @@ static inline char *IB(void)
 #define DISABLE_ONE_OWNER 1u
 #define DISABLE_MAILBOX   2u
 #define DISABLE_SHARED_CP 4u
+#define DISABLE_TRIGGER_NEAR 8u
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
@@ -62,6 +63,12 @@ static inline void bump(volatile u32 *d, u32 field)
 #define GAME_DIFFICULTY   0x49c       /* AOLGame::DifficultyMode (BYTE, 3 = Insane: a death restarts through StartNewGameAtCheckpoint) */
 #define PC_HEROPAWN       0xa5c       /* AOLPlayerController::HeroPawn */
 #define CH_WORLD          5
+#define WORLD_TRIGGER_ACT 0x01        /* [countLE4][pathLen][path ASCII], + our tail [magic 'OLP1'][x f32][y f32][z f32] (old clients ignore trailing bytes) */
+#define TRIG_TAIL_MAGIC   0x31504C4Fu /* 'OLP1' little endian */
+#define TRIG_RADIUS_SQ_BITS 0x4b095440u /* 3000 * 3000 as float bits: the default when the data area field is 0 */
+#define TRIG_QUEUE_MAX    6
+#define TRIG_ENTRY_SIZE   192         /* u64 channel, i32 sender, u32 type, i32 len, f32 x y z, then up to 160 bytes of the packet */
+#define TRIG_DATA_MAX     160
 #define WORLD_CHECKPOINT_LOAD 0x11    /* new: [nameLen][name ASCII][persistLen][persistent level ASCII] */
 #define RVA_APPLYSPAWN    0x171eb00   /* static void ApplySpawn(UEnemyChannel*, INT sender, FString& name, FString& class, FLOAT x,y,z, INT yaw, ...) */
 #define RVA_DESTROYACTOR  0x08d7550   /* UBOOL UWorld::DestroyActor(AActor*, UBOOL bNetForce, UBOOL bShouldModifyLevel) */
@@ -184,9 +191,137 @@ void my_SendSpawn(char *ch, char *e)
     (*(SendSpawnFn *)(vt + 0x268))(ch, e);
 }
 
+typedef void (*WorldPacketFn)(char *, i32, u32, const u8 *, i32);
+
+/* ---- Story triggers only for players near them (patch v6) ----
+ * The bug: a trigger touched by one player is force-activated on every client, wherever its hero is (a scripted scene can start for a partner on another
+ * floor). The rule: the sender appends where it stood when it touched the trigger; a receiver whose hero is farther than the radius keeps the packet in a
+ * small queue and applies it once its own hero comes within the radius. Packets without the tail (an unpatched sender) and an unknown own position fail
+ * open (applied at once, as before). The queue is dropped on every checkpoint load and when the local controller changes (a new map). */
+static inline float u2f(u32 bits)
+{
+    float k;
+    __asm__("movd %1, %0" : "=x"(k) : "r"(bits));
+    return k;
+}
+
+static inline float trig_radius_sq(volatile u32 *d)
+{
+    u32 b = d[F_TRIG_RADIUS_SQ / 4];
+    if (b == 0) {
+        __asm__("movl %1, %0" : "=r"(b) : "i"(TRIG_RADIUS_SQ_BITS));
+    }
+    return u2f(b);
+}
+
+static inline int hero_near(volatile u32 *d, float x, float y, float z)
+{
+    float dx = u2f(d[F_HERO_X / 4]) - x, dy = u2f(d[F_HERO_Y / 4]) - y, dz = u2f(d[F_HERO_Z / 4]) - z;
+    return dx * dx + dy * dy + dz * dz <= trig_radius_sq(d);
+}
+
+static void trig_queue_clear(volatile u32 *d)
+{
+    u32 n = d[F_TRIG_COUNT / 4];
+    d[F_TRIG_COUNT / 4] = 0;
+    d[F_CNT_TRIG_CLEARED / 4] = d[F_CNT_TRIG_CLEARED / 4] + n;
+}
+
+/* Sender side: replaces the call of FMpConnection::SendBinary in SendWorldIntString (only ever used for WORLD_TRIGGER_ACT): append our hero position. */
+__attribute__((noinline, used))
+void my_SendTrigger(void *conn, const u8 *b, i32 n)
+{
+    char *ib = IB();
+    volatile u32 *d = data_area(ib);
+    u8 buf[TRIG_DATA_MAX + 2 + 16];
+    volatile u8 *vb = buf;                                               /* volatile: keeps the compiler from turning the copies into a memcpy call */
+    if (b && n >= 7 && n <= TRIG_DATA_MAX + 2 && b[0] == CH_WORLD && b[1] == WORLD_TRIGGER_ACT && d[F_HERO_VALID / 4]) {
+        for (i32 i = 0; i < n; i++)
+            vb[i] = b[i];
+        *(volatile u32 *)(vb + n) = TRIG_TAIL_MAGIC;
+        *(volatile u32 *)(vb + n + 4) = d[F_HERO_X / 4];
+        *(volatile u32 *)(vb + n + 8) = d[F_HERO_Y / 4];
+        *(volatile u32 *)(vb + n + 12) = d[F_HERO_Z / 4];
+        bump(d, F_CNT_TRIG_SENT_POS);
+        b = buf;
+        n += 16;
+    }
+    ((void (*)(void *, const u8 *, i32))(ib + RVA_SENDBINARY))(conn, b, n);
+}
+
+/* Receiver side, called from my_WorldPacket for WORLD_TRIGGER_ACT. Returns 1 when the packet was queued (not applied now). */
+static int trig_maybe_defer(volatile u32 *d, char *ch, i32 sender, u32 type, const u8 *data, i32 len)
+{
+    bump(d, F_CNT_TRIG_RECV);
+    if ((d[F_DISABLE / 4] & DISABLE_TRIGGER_NEAR) || !data || len < 5 || !d[F_HERO_VALID / 4])
+        return 0;
+    i32 base = 5 + data[4];
+    if (len != base + 16 || *(const u32 *)(data + base) != TRIG_TAIL_MAGIC)
+        return 0;                                                        /* no position: an unpatched sender */
+    float x = *(const float *)(data + base + 4), y = *(const float *)(data + base + 8), z = *(const float *)(data + base + 12);
+    if (hero_near(d, x, y, z))
+        return 0;
+    u32 k = d[F_TRIG_COUNT / 4];
+    if (k >= TRIG_QUEUE_MAX || base > TRIG_DATA_MAX) {
+        bump(d, F_CNT_TRIG_OVERFLOW);                                    /* fail open: apply now, as upstream does */
+        return 0;
+    }
+    volatile char *e = (volatile char *)d + F_TRIG_QUEUE + k * TRIG_ENTRY_SIZE;
+    *(char *volatile *)e = ch;
+    *(volatile i32 *)(e + 8) = sender;
+    *(volatile u32 *)(e + 12) = type;
+    *(volatile i32 *)(e + 16) = base;                                    /* replayed without the tail */
+    *(volatile float *)(e + 20) = x;
+    *(volatile float *)(e + 24) = y;
+    *(volatile float *)(e + 28) = z;
+    for (i32 i = 0; i < base; i++)
+        e[32 + i] = (char)data[i];
+    d[F_TRIG_COUNT / 4] = k + 1;
+    bump(d, F_CNT_TRIG_DEFERRED);
+    return 1;
+}
+
+/* Per frame: remember where our hero is, and apply the queued triggers we have come near to (all of them when the feature is switched off). */
+static void trig_tick(volatile u32 *d, char *pc)
+{
+    char *hero = pc ? *(char **)(pc + PC_HEROPAWN) : 0;
+    char *owner = *(char *volatile *)((volatile char *)d + F_TRIG_PC);
+    if (!hero) {                                                         /* no hero (loading, respawn, a controller that is not the player's): skip */
+        if (pc == owner)
+            d[F_HERO_VALID / 4] = 0;
+        return;
+    }
+    if (owner != pc) {                                                   /* another controller with a hero: a new map, the queued channel pointers are stale */
+        *(char *volatile *)((volatile char *)d + F_TRIG_PC) = pc;
+        trig_queue_clear(d);
+    }
+    d[F_HERO_X / 4] = *(u32 *)(hero + ACTOR_LOC);
+    d[F_HERO_Y / 4] = *(u32 *)(hero + ACTOR_LOC + 4);
+    d[F_HERO_Z / 4] = *(u32 *)(hero + ACTOR_LOC + 8);
+    d[F_HERO_VALID / 4] = 1;
+    u32 n = d[F_TRIG_COUNT / 4];
+    if (!n)
+        return;
+    int all = (d[F_DISABLE / 4] & DISABLE_TRIGGER_NEAR) != 0;
+    u32 w = 0;
+    for (u32 i = 0; i < n; i++) {
+        volatile char *e = (volatile char *)d + F_TRIG_QUEUE + i * TRIG_ENTRY_SIZE;
+        if (all || hero_near(d, *(volatile float *)(e + 20), *(volatile float *)(e + 24), *(volatile float *)(e + 28))) {
+            char *ch = *(char *volatile *)e;
+            bump(d, F_CNT_TRIG_REPLAYED);
+            (*(WorldPacketFn *)(*(char **)ch + 0x298))(ch, *(volatile i32 *)(e + 8), *(volatile u32 *)(e + 12), (const u8 *)(e + 32), *(volatile i32 *)(e + 16));
+            continue;
+        }
+        if (w != i)
+            for (u32 j = 0; j < TRIG_ENTRY_SIZE; j++)
+                ((volatile char *)d + F_TRIG_QUEUE + w * TRIG_ENTRY_SIZE)[j] = e[j];
+        w++;
+    }
+    d[F_TRIG_COUNT / 4] = w;
+}
+
 typedef i32 (*TickFn)(char *, float, i32);
 typedef void (*SNGACFn)(char *, void *, i32);
-typedef void (*WorldPacketFn)(char *, i32, u32, const u8 *, i32);
 
 static int same_name(const volatile char *a, const unsigned short *w, i32 wn)
 {
@@ -230,6 +365,7 @@ i32 my_Tick(char *pc, float dt, i32 type)
 {
     char *ib = IB();
     volatile u32 *d = data_area(ib);
+    trig_tick(d, pc);
     char *rb = *(char *volatile *)((volatile char *)d + F_REBROADCAST_CTRL);
     if (rb) {                                                            /* announce all our enemies again: empty the 'already announced' list */
         *(char *volatile *)((volatile char *)d + F_REBROADCAST_CTRL) = 0;
@@ -291,6 +427,7 @@ void my_SNGAC(char *pc, void *fname, i32 bsave)
     volatile u32 *d = data_area(ib);
     char *hero = pc ? *(char **)(pc + PC_HEROPAWN) : 0;
     int dying = hero && *(i32 *)(hero + PAWN_HEALTH) <= 0;
+    trig_queue_clear(d);                                                 /* triggers of the old place must not fire in the new one */
     ((SNGACFn)(ib + RVA_SNGAC))(pc, fname, bsave);
     const unsigned short *w = fname ? *(const unsigned short **)fname : 0;
     i32 wn = fname ? *(i32 *)((char *)fname + 8) : 0;
@@ -335,6 +472,8 @@ void my_WorldPacket(char *ch, i32 sender, u32 type, const u8 *data, i32 len)
 {
     char *ib = IB();
     volatile u32 *d = data_area(ib);
+    if ((type & 0xff) == WORLD_TRIGGER_ACT && trig_maybe_defer(d, ch, sender, type, data, len))
+        return;
     if ((type & 0xff) != WORLD_CHECKPOINT_LOAD) {
         char *vt = *(char **)ch;
         (*(WorldPacketFn *)(vt + 0x298))(ch, sender, type, data, len);

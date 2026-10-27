@@ -68,9 +68,11 @@ class Peer:
     def send(self, ch, typ, payload=b""):
         self.s.sendto(bytes([ch, typ]) + struct.pack("<I", self.pid) + payload, self.addr)
 
-    def trigger(self, path, count=0):
+    def trigger(self, path, count=0, pos=None):
+        """pos=(x, y, z) appends the tail of exe-patch v6 (magic 'OLP1' + where the sender stood), as a patched client sends it."""
         p = path.encode()
-        self.send(CH_WORLD, WORLD_TRIGGER_ACT, struct.pack("<i", count) + bytes([len(p)]) + p)
+        tail = b"" if pos is None else struct.pack("<I", 0x31504C4F) + struct.pack("<fff", *pos)
+        self.send(CH_WORLD, WORLD_TRIGGER_ACT, struct.pack("<i", count) + bytes([len(p)]) + p + tail)
 
     def hero_at(self, template_hex, x, y, z):
         """Announce a hero position: a copy of a real HERO_STATE packet (so receivers parse a full-size one) with our id and x,y,z."""
@@ -132,6 +134,13 @@ def main():
     if cmd == "trigger":
         peer.trigger(sys.argv[5], int(sys.argv[6]) if len(sys.argv) > 6 else 0)
         print("sent", sys.argv[5], flush=True)
+        time.sleep(2)
+        return
+    if cmd == "trigger-tail":
+        # trigger-tail <path> <x> <y> <z>: send the trigger the way a client with exe-patch v6 does (position appended), no hero packet
+        pos = (float(sys.argv[6]), float(sys.argv[7]), float(sys.argv[8]))
+        peer.trigger(sys.argv[5], 0, pos)
+        print("sent", sys.argv[5], "with position", pos, flush=True)
         time.sleep(2)
         return
     if cmd == "trigger-at":

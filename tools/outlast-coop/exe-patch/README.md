@@ -61,3 +61,36 @@ A per-frame hook (`AOLPlayerController::Tick`, the vtable slot +0x350 of the OLP
 writes into the data area: `LOAD_CHECKPOINT name [persistent level]` calls the overlay's own loader (`ExecCP`) from the game thread, outside the network poll. `harness/olmail.py <pid> load <name>` sends it;
 `harness/mailbox_live.py` checks it with two clients and **no mouse and no keyboard**: both heroes moved from (3702, 4291) to the survey position of `Prison_IsolationCells01_Mid` (1979, 3481), the mailbox
 answered in 0.05 s. The same-world case needs no persistent level name; a jump to another map needs it (not yet mapped).
+
+## Shared checkpoint loads (patch v4, v5)
+
+`StartNewGameAtCheckpoint` (vtable +0xa88 of both controller tables) tells the partners about every checkpoint load with a new world packet `WORLD_CHECKPOINT_LOAD` (0x11);
+the world packet dispatch (`call [rax+0x298]` in `OnReceiveBinaryData`) stores a partner's load and the per-frame hook runs it through the overlay's loader. An echo guard keeps the
+follower from sending the load back; a death restart and Insane mode are not shared. `harness/shared_cp_live.py`: SC1 to SC5 PASS (2026-10-22).
+
+## Story triggers only near the hero (patch v6)
+
+The bug: a trigger touched by one player is force-activated on every client wherever its hero is (problem 4 of the write-up), so a scripted scene can start for a partner on
+another floor. The relay patch 0001 only softens it (it filters by the sender's last hero packet, and only on a relay built with it). v6 does it in the clients, with any relay:
+
+| Site (RVA) | Original | Hook | Rule |
+|---|---|---|---|
+| `0x1734D4E` in the static `SendWorldIntString` (`0x1734c10`; its only caller `0x172e14c` is `OnPawnTouchedTrigger`) | `call FMpConnection::SendBinary` | `my_SendTrigger` | append a 16-byte tail to `WORLD_TRIGGER_ACT`: magic `OLP1` and where our hero stands |
+| `0x172E76C` (already hooked by v5) | `call [rax+0x298]` | `my_WorldPacket` | a trigger whose tail is farther than the radius (default 3000 units) from our hero is queued instead of applied |
+| `AOLPlayerController::Tick` (already hooked by v3) | | `my_Tick` | records our hero position every frame; applies the queued triggers we have come within the radius of |
+
+Fail open everywhere: a trigger without the tail (an unpatched partner), a client without a hero of its own, a full queue (6 entries) or a path longer than 155 bytes is applied at once,
+as before. Unpatched clients ignore the tail (`ReadWorldString` reads the length byte; trailing bytes are not looked at; the relays log and forward the packet unchanged). The queue is
+dropped on every checkpoint load and when another controller starts ticking (a map change), so a channel pointer of an old map is never used. Kill switch: disable bit 3 applies every
+trigger at once and flushes the queue. `harness/olmail.py <pid> radius <units>` changes the radius at run time.
+
+Tests:
+
+- `emutest.py` (no game, no exe; needs `pip install unicorn`): runs the built code of `olfix.json` in a CPU emulator against fake controllers, heroes and channels, with the Windows x64
+  calling convention. E0 to E17: position recorded, tail appended to triggers only, near applied, far queued and replayed once when near (original sender, type and payload without
+  the tail), twin with the bit set, cleared by a checkpoint load and by a new controller, overflow fails open, no hero fails open, other world packets and the v5 checkpoint packet
+  untouched. 18/18 PASS; a mutant whose distance check always says "near" fails 8 of them.
+- `harness/trigger_near_live.py` (two real clients, a scripted peer, the upstream relay): TN1 to TN6. **Not run yet.**
+
+Limits: the position is where the sender stood when it touched the trigger, not the trigger volume itself (a very large volume needs a larger radius). Two players who both pass
+a one-shot trigger each fire it themselves; the queued copy then finds it used up and does nothing (the original `MaxTriggerCount` check).

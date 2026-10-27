@@ -1,11 +1,11 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "c85b55777f3e8ae3e1a2f46f49902b7ca587f55809f4d911e2ce3988baa3d1a5",
+  "output_sha256": "12fe9faa66e0ac85d196240bf51181675d90ab28fcc73190f7ae4d0665574c7c",
   "section": {
     "name": ".olfix",
     "cave_rva": "0x39AF000",
     "data_size": 4096,
-    "data_offset": "0x1000"
+    "data_offset": "0x2000"
   },
   "sites": [
     {
@@ -63,6 +63,14 @@
       "expect": "ff9098020000",
       "symbol": "my_WorldPacket",
       "note": "call [rax+0x298] = UWorldChannel::OnBinaryWorldPacket(ch, sender, type, data, len) in OnReceiveBinaryData"
+    },
+    {
+      "name": "send_trigger",
+      "kind": "call32",
+      "rva": "0x1734D4E",
+      "expect": "e85d8c0100",
+      "symbol": "my_SendTrigger",
+      "note": "call FMpConnection::SendBinary in the static SendWorldIntString (0x1734c10, only caller 0x172e14c = OnPawnTouchedTrigger): the hook appends the sender's hero position to WORLD_TRIGGER_ACT"
     }
   ],
   "layout": {
@@ -86,15 +94,29 @@
     "cnt_echo_suppressed": 400,
     "cnt_rebroadcast": 404,
     "rebroadcast_ctrl": 416,
+    "hero_x": 424,
+    "hero_y": 428,
+    "hero_z": 432,
+    "hero_valid": 436,
+    "trig_radius_sq": 440,
+    "cnt_trig_recv": 444,
+    "cnt_trig_deferred": 448,
+    "cnt_trig_replayed": 452,
+    "cnt_trig_cleared": 456,
+    "cnt_trig_overflow": 460,
+    "trig_pc": 464,
+    "cnt_trig_sent_pos": 472,
+    "trig_count": 476,
     "follow_name": 512,
     "follow_persist": 640,
     "expect_name": 768,
+    "trig_queue": 896,
     "persist_table": 2048
   },
   "layout_doc": {
     "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
     "version": "u32, 2 for this layout",
-    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads, bit 3 = story triggers only near the hero (set: every trigger is applied at once, as upstream; queued ones are flushed)",
     "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
     "cnt_send_calls": "u32 calls of the SendSpawn hook",
     "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
@@ -112,9 +134,23 @@
     "cnt_echo_suppressed": "u32 loads not re-sent because they were a partner's load",
     "cnt_rebroadcast": "u32 times our enemies were announced again because a partner had a copy of one of them (the partner may have loaded after our first announcement)",
     "rebroadcast_ctrl": "u64 the multiplayer controller whose 'already announced' list the per-frame hook clears (0 = nothing to do)",
+    "hero_x": "f32 our hero's location, written every frame by the per-frame hook",
+    "hero_y": "f32",
+    "hero_z": "f32",
+    "hero_valid": "u32 1 when hero_x..z are from this frame's hero",
+    "trig_radius_sq": "f32 bits, the trigger radius squared in world units; 0 = the default 3000 (same as the relay patch 0001 in the suite)",
+    "cnt_trig_recv": "u32 WORLD_TRIGGER_ACT packets received",
+    "cnt_trig_deferred": "u32 triggers queued because our hero was farther than the radius",
+    "cnt_trig_replayed": "u32 queued triggers applied (our hero came near, or the feature was switched off)",
+    "cnt_trig_cleared": "u32 queued triggers dropped by a checkpoint load or a new controller (map change)",
+    "cnt_trig_overflow": "u32 far triggers applied at once because the queue was full or the packet too long (fail open)",
+    "trig_pc": "u64 the controller the queue belongs to; another controller in the per-frame hook clears the queue",
+    "cnt_trig_sent_pos": "u32 WORLD_TRIGGER_ACT packets sent with our position appended",
+    "trig_count": "u32 entries in trig_queue (at most 6)",
     "follow_name": "char[128]",
     "follow_persist": "char[128]",
     "expect_name": "char[128] the partner's load being executed here (echo guard)",
+    "trig_queue": "6 entries of 192 bytes: u64 world channel, i32 sender, u32 type, i32 len, f32 x y z, the packet without the position tail (at most 160 bytes)",
     "persist_table": "pairs 'checkpoint-name prefix NUL persistent level NUL', ends with an empty prefix; written into the file by the applier (data_init)"
   },
   "data_init": {
