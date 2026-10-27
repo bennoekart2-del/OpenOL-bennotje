@@ -13,8 +13,8 @@
   as OLGame_original.exe. No firewall, router or Steam settings are touched.
 #>
 param(
-    [string]$SteamGame = "",      # the Steam install of Outlast; found automatically when empty
-    [string]$Target = "",         # the co-op copy; default: <same drive>\OutlastCoop
+    [string]$SteamGame = "",      # your Outlast install; empty: a window asks (the Steam install is pre-selected)
+    [string]$Target = "",         # the co-op copy; empty: a window asks for the folder to put OutlastCoop in
     [string]$HostIp = "",         # empty: ask. 127.0.0.1 = you host
     [string]$Name = "",
     [int]$Port = 7777,
@@ -55,35 +55,66 @@ function Set-IniKeys($path, $section, $values) {
     [System.IO.File]::WriteAllLines($path, $out, (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# ---- 1. find the Steam install ------------------------------------------------------------------------------
-Step 1 "Finding Outlast in your Steam libraries"
-if (-not $SteamGame) {
+# ---- 1. where is the game --------------------------------------------------------------------------------
+function Pick-Folder($description, $start) {
+    # A "choose folder" window; returns "" when cancelled.
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = $description
+    $dlg.ShowNewFolderButton = $true
+    if ($start -and (Test-Path $start)) { $dlg.SelectedPath = $start }
+    $owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true }   # keeps the window in front of the console
+    $res = $dlg.ShowDialog($owner)
+    $owner.Dispose()
+    if ($res -eq [System.Windows.Forms.DialogResult]::OK) { return $dlg.SelectedPath }
+    return ""
+}
+
+Step 1 "Where is Outlast installed?"
+$guess = ""
+$steam = (Get-ItemProperty -Path "HKCU:\Software\Valve\Steam" -Name SteamPath -ErrorAction SilentlyContinue).SteamPath
+if ($steam) {                                                   # pre-select the Steam install if there is one
     $libs = New-Object System.Collections.Generic.List[string]
-    $steam = (Get-ItemProperty -Path "HKCU:\Software\Valve\Steam" -Name SteamPath -ErrorAction SilentlyContinue).SteamPath
-    if ($steam) {
-        $libs.Add($steam)
-        $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
-        if (Test-Path $vdf) {
-            foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s+"([^"]+)"')) { $libs.Add($m.Groups[1].Value -replace '\\\\', '\') }
-        }
+    $libs.Add($steam)
+    $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
+    if (Test-Path $vdf) {
+        foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s+"([^"]+)"')) { $libs.Add($m.Groups[1].Value -replace '\\\\', '\') }
     }
     foreach ($lib in $libs) {
         $cand = Join-Path $lib "steamapps\common\Outlast"
-        if (Test-Path (Join-Path $cand "Binaries\Win64\OLGame.exe")) { $SteamGame = $cand; break }
+        if (Test-Path (Join-Path $cand "Binaries\Win64\OLGame.exe")) { $guess = $cand; break }
     }
-    if (-not $SteamGame) { Fail "Outlast was not found in your Steam libraries. Run again with -SteamGame <folder of your Outlast install>." }
 }
+while (-not $SteamGame) {
+    Write-Host "  A window opens: select your Outlast folder (the one with the Binaries and OLGame folders in it)."
+    $pick = Pick-Folder "Select your Outlast folder (it contains the Binaries and OLGame folders)." $guess
+    if (-not $pick) { Fail "no folder selected." }
+    $up = $pick
+    for ($n = 0; $n -lt 3 -and $up; $n++) {                      # also accept Binaries or Binaries\Win64 picked by mistake
+        if (Test-Path (Join-Path $up "Binaries\Win64\OLGame.exe")) { $SteamGame = $up; break }
+        $up = [System.IO.Path]::GetDirectoryName($up)            # "" or $null at a drive root, which ends the loop
+    }
+    if (-not $SteamGame) { Write-Host "  '$pick' is not an Outlast folder (no Binaries\Win64\OLGame.exe). Try again." -ForegroundColor Yellow; $guess = $pick }
+}
+if (-not (Test-Path (Join-Path $SteamGame "Binaries\Win64\OLGame.exe"))) { Fail "'$SteamGame' is not an Outlast folder (no Binaries\Win64\OLGame.exe)." }
 $SteamGame = (Resolve-Path -LiteralPath $SteamGame).Path
-Write-Host "  Steam install: $SteamGame"
+Write-Host "  Game: $SteamGame"
 if (-not (Test-Path (Join-Path $SteamGame "OLGame\CookedPCConsoleDLC\DLC_Intro_Persistent.upk"))) {
-    Fail "the Whistleblower DLC is not installed. OpenOL's multiplayer needs it: install it in Steam, then run this again."
+    Fail "the Whistleblower DLC is not in that folder. OpenOL's multiplayer needs it: install it in Steam, then run this again."
 }
 
 # ---- 2. copy the game ---------------------------------------------------------------------------------------
-if (-not $Target) { $Target = Join-Path ([System.IO.Path]::GetPathRoot($SteamGame)) "OutlastCoop" }
+if (-not $Target) {
+    $default = [System.IO.Path]::GetPathRoot($SteamGame)
+    Write-Host "  A second window opens: select where the co-op copy should go (a folder 'OutlastCoop' is made inside it, about 6.5 GB)."
+    $parent = Pick-Folder "Where should the co-op copy go? A folder 'OutlastCoop' is made inside the folder you select (about 6.5 GB)." $default
+    if (-not $parent) { Fail "no folder selected." }
+    $Target = if ((Split-Path -Leaf $parent) -ieq "OutlastCoop") { $parent } else { Join-Path $parent "OutlastCoop" }
+}
 $Target = [System.IO.Path]::GetFullPath($Target)
-if ($Target.TrimEnd('\') -ieq $SteamGame.TrimEnd('\')) { Fail "the target is the Steam folder itself. Choose another -Target." }
-if ($Target -match "\\steamapps\\") { Fail "the target '$Target' is inside a Steam library. Choose a folder outside steamapps." }
+if ($Target.TrimEnd('\') -ieq $SteamGame.TrimEnd('\')) { Fail "the co-op copy cannot be the game folder itself. Choose another folder." }
+if ($Target.StartsWith($SteamGame.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { Fail "the co-op copy cannot be inside the game folder. Choose another folder." }
+if ($Target -match "\\steamapps\\") { Fail "'$Target' is inside a Steam library. Choose a folder outside steamapps." }
 $exe = Join-Path $Target "Binaries\Win64\OLGame.exe"
 Step 2 "Copying the game to $Target"
 if (Test-Path $exe) {
