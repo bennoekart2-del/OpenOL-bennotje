@@ -1,11 +1,11 @@
 # Outlast Co-op: play Outlast with a friend
 
-**[⬇ Download the installer (OutlastCoop-Installer.zip)](https://github.com/bennoekart2-del/OpenOL-bennotje/releases/latest/download/OutlastCoop-Installer.zip)**
+**[⬇ Download (ZIP)](https://github.com/bennoekart2-del/OpenOL-bennotje/archive/refs/heads/main.zip)**
 
 **You need:** Windows and Outlast on Steam **with the Whistleblower DLC**. Every player needs their own copy of the game.
 
 1. Download the zip above and unzip it, for example to your Desktop.
-2. Double-click **`INSTALL-OUTLAST-COOP.bat`**. If Windows asks whether to run it, click *More info* and then *Run anyway*.
+2. Open the unzipped folder and double-click **`INSTALL-OUTLAST-COOP.bat`**. If Windows asks whether to run it, click *More info* and then *Run anyway*.
 3. In the first window, select your Outlast folder. The Steam folder is usually already selected, so just click OK.
 4. In the second window, choose where the co-op copy should go (it needs about 6.5 GB). Your Steam game is never changed.
 5. Answer two questions: are you hosting, and what is your name. A friend who joins types the host's IP address.
