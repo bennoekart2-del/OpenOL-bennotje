@@ -132,6 +132,12 @@ if (Test-Path $exe) {
 # ---- 3. install OpenOL 2.1.0 --------------------------------------------------------------------------------
 Step 3 "Installing OpenOL 2.1.0 into the copy"
 $h = Sha $exe
+$keep = Join-Path $Target "Binaries\Win64\OLGame_original.exe"
+if ($h -ne $EXE_OPENOL -and $h -ne $EXE_PATCHED -and (Test-Path $keep) -and ((Sha $keep) -eq $EXE_OPENOL)) {
+    Write-Host "  An older co-op patch is installed: starting again from the kept OLGame_original.exe."
+    Copy-Item $keep $exe -Force
+    $h = $EXE_OPENOL
+}
 if ($h -eq $EXE_OPENOL -or $h -eq $EXE_PATCHED) {
     Write-Host "  Already installed."
 } else {

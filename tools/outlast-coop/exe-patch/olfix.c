@@ -38,6 +38,7 @@ static inline char *IB(void)
 #define DISABLE_MAILBOX   2u
 #define DISABLE_SHARED_CP 4u
 #define DISABLE_TRIGGER_NEAR 8u
+#define DISABLE_LATE_COPY 16u
 static inline volatile u32 *data_area(char *ib)
 {
     volatile u32 *d = (volatile u32 *)(ib + CAVE_RVA + DATA_OFFSET);
@@ -92,6 +93,15 @@ static inline void bump(volatile u32 *d, u32 field)
 #define OBJ_CLASS         0x50        /* UObject::Class (Index at +0x38 and Name at +0x48 were confirmed in GetName()) */
 #define SAME_PLACE_SQ_BITS 0x46afc800u /* 150 * 150 as float bits: an integer immediate, so the compiler emits no .rdata constant */
 
+/* Late copies (patch v7): a story enemy is spawned by each client's own Kismet when that client's player reaches the trigger, so the two copies can be born
+   seconds or minutes apart. By then the first copy has walked away from the spawn point and the same-place rule above never sees the pair. The fix: remember
+   where every puppet was born (the position of its spawn packet) and which of our own enemies we have already seen; an enemy of ours seen for the FIRST
+   time at the birth place of a partner's puppet of the same class is the late copy of that enemy: it is destroyed before it is announced, whatever the ids
+   (the partner's copy is already running the scene). Both tables are dropped on every checkpoint load and on a new controller. */
+#define PUP_MAX           32
+#define PUP_ENTRY         24          /* u64 puppet, f32 x y z of its spawn packet, u32 pad */
+#define SEEN_MAX          64          /* u64 own enemies already seen by the SendSpawn hook */
+
 typedef void (*ApplySpawnFn)(char *, i32, void *, void *, float, float, float, i32, void *, i32, i32, float, float, float, float);
 typedef void (*SendSpawnFn)(char *, char *);
 
@@ -120,6 +130,97 @@ static inline float dist2(const char *e, float x, float y, float z)
     return dx * dx + dy * dy + dz * dz;
 }
 
+static int is_puppet(char *ctrl, char *p)
+{
+    char *rem = *(char **)(ctrl + CTRL_REMOTE);
+    i32 n = *(i32 *)(ctrl + CTRL_REMOTE + 8);
+    for (i32 i = 0; rem && i < n; i++)
+        if (*(char **)(rem + (long long)i * REMOTE_STRIDE + REMOTE_DUMMY) == p)
+            return 1;
+    return 0;
+}
+
+static int is_own(char *ctrl, char *e)
+{
+    char **arr = *(char ***)(ctrl + CTRL_CACHED);
+    i32 n = *(i32 *)(ctrl + CTRL_CACHED + 8);
+    for (i32 i = 0; arr && i < n; i++)
+        if (arr[i] == e)
+            return 1;
+    return 0;
+}
+
+static void late_clear(volatile u32 *d)
+{
+    d[F_PUP_COUNT / 4] = 0;
+    d[F_SEEN_COUNT / 4] = 0;
+}
+
+/* remember where puppet p was born; a full table first drops the puppets that are gone, and when still full the new one is not remembered (old rule only) */
+static void pup_add(volatile u32 *d, char *ctrl, char *p, float x, float y, float z)
+{
+    volatile char *t = (volatile char *)d + F_PUP_TABLE;
+    u32 n = d[F_PUP_COUNT / 4];
+    if (n >= PUP_MAX) {
+        u32 w = 0;
+        for (u32 i = 0; i < n; i++) {
+            if (!is_puppet(ctrl, *(char *volatile *)(t + i * PUP_ENTRY)))
+                continue;
+            if (w != i)
+                for (u32 j = 0; j < PUP_ENTRY; j++)
+                    t[w * PUP_ENTRY + j] = t[i * PUP_ENTRY + j];
+            w++;
+        }
+        n = w;
+        d[F_PUP_COUNT / 4] = n;
+        if (n >= PUP_MAX) {
+            bump(d, F_CNT_LATE_FULL);
+            return;
+        }
+    }
+    volatile char *e = t + n * PUP_ENTRY;
+    *(char *volatile *)e = p;
+    *(volatile float *)(e + 8) = x;
+    *(volatile float *)(e + 12) = y;
+    *(volatile float *)(e + 16) = z;
+    d[F_PUP_COUNT / 4] = n + 1;
+}
+
+static volatile char *pup_find(volatile u32 *d, char *p)
+{
+    volatile char *t = (volatile char *)d + F_PUP_TABLE;
+    u32 n = d[F_PUP_COUNT / 4];
+    for (u32 i = 0; i < n && i < PUP_MAX; i++)
+        if (*(char *volatile *)(t + i * PUP_ENTRY) == p)
+            return t + i * PUP_ENTRY;
+    return 0;
+}
+
+/* 1 when our enemy e has passed the SendSpawn hook before; otherwise remembers it and returns 0. A table that stays full answers 1 (old rule only). */
+static int own_seen(volatile u32 *d, char *ctrl, char *e)
+{
+    char *volatile *t = (char *volatile *)((volatile char *)d + F_SEEN_TABLE);
+    u32 n = d[F_SEEN_COUNT / 4];
+    for (u32 i = 0; i < n && i < SEEN_MAX; i++)
+        if (t[i] == e)
+            return 1;
+    if (n >= SEEN_MAX) {
+        u32 w = 0;
+        for (u32 i = 0; i < n; i++)
+            if (is_own(ctrl, t[i]))
+                t[w++] = t[i];
+        n = w;
+        d[F_SEEN_COUNT / 4] = n;
+        if (n >= SEEN_MAX) {
+            bump(d, F_CNT_LATE_FULL);
+            return 1;
+        }
+    }
+    t[n] = e;
+    d[F_SEEN_COUNT / 4] = n + 1;
+    return 0;
+}
+
 __attribute__((noinline, used))
 void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y, float z, i32 yaw, void *mesh, i32 weapon, i32 has_color,
                    float cr, float cg, float cb, float ca)
@@ -139,6 +240,7 @@ void my_ApplySpawn(char *ch, i32 sender, void *name, void *cls, float x, float y
     char *d = *(char **)(r + REMOTE_DUMMY);       /* the puppet the original just made */
     if (!d)
         return;
+    pup_add(d0, ctrl, d, x, y, z);                /* its birth place, for the late-copy rule in my_SendSpawn */
     char **arr = *(char ***)(ctrl + CTRL_CACHED);
     i32 n = *(i32 *)(ctrl + CTRL_CACHED + 8);
     for (i32 i = 0; arr && i < n; i++) {
@@ -184,6 +286,19 @@ void my_SendSpawn(char *ch, char *e)
             bump(d0, F_CNT_PUPPET_DESTROYED);
             *(char *volatile *)((volatile char *)d0 + F_REBROADCAST_CTRL) = ctrl;   /* make sure the owner of that puppet hears of ours */
             break;
+        }
+        if (!(d0[F_DISABLE / 4] & DISABLE_LATE_COPY) && !own_seen(d0, ctrl, e)) {
+            for (i32 i = 0; rem && i < n; i++) {                         /* our enemy is new: is it born where a partner's copy was born? */
+                char *dd = *(char **)(rem + (long long)i * REMOTE_STRIDE + REMOTE_DUMMY);
+                if (!dd || *(void **)(dd + OBJ_CLASS) != *(void **)(e + OBJ_CLASS))
+                    continue;
+                volatile char *b = pup_find(d0, dd);
+                if (!b || dist2(e, *(volatile float *)(b + 8), *(volatile float *)(b + 12), *(volatile float *)(b + 16)) >= same_place_sq())
+                    continue;
+                destroy_actor(ib, e);        /* the late copy: the partner's enemy already plays this scene, keep its puppet */
+                bump(d0, F_CNT_LATE_DROPPED);
+                return;
+            }
         }
     }
     /* the original SendSpawn, found through the vtable the patched call site no longer reads */
@@ -294,6 +409,7 @@ static void trig_tick(volatile u32 *d, char *pc)
     if (owner != pc) {                                                   /* another controller with a hero: a new map, the queued channel pointers are stale */
         *(char *volatile *)((volatile char *)d + F_TRIG_PC) = pc;
         trig_queue_clear(d);
+        late_clear(d);
     }
     d[F_HERO_X / 4] = *(u32 *)(hero + ACTOR_LOC);
     d[F_HERO_Y / 4] = *(u32 *)(hero + ACTOR_LOC + 4);
@@ -428,6 +544,7 @@ void my_SNGAC(char *pc, void *fname, i32 bsave)
     char *hero = pc ? *(char **)(pc + PC_HEROPAWN) : 0;
     int dying = hero && *(i32 *)(hero + PAWN_HEALTH) <= 0;
     trig_queue_clear(d);                                                 /* triggers of the old place must not fire in the new one */
+    late_clear(d);                                                       /* nor birth places of the old world's enemies count in the new one */
     ((SNGACFn)(ib + RVA_SNGAC))(pc, fname, bsave);
     const unsigned short *w = fname ? *(const unsigned short **)fname : 0;
     i32 wn = fname ? *(i32 *)((char *)fname + 8) : 0;

@@ -1,6 +1,6 @@
 {
   "input_sha256": "2e58afbb1203d04476581f34216428d1dfc96228e5f3df8c6881323c56c93346",
-  "output_sha256": "12fe9faa66e0ac85d196240bf51181675d90ab28fcc73190f7ae4d0665574c7c",
+  "output_sha256": "52392a325d76d1305a0508f06cc8bb7bfc4c4934264e0541c61b48ff52480184",
   "section": {
     "name": ".olfix",
     "cave_rva": "0x39AF000",
@@ -107,16 +107,22 @@
     "trig_pc": 464,
     "cnt_trig_sent_pos": 472,
     "trig_count": 476,
+    "pup_count": 480,
+    "seen_count": 484,
+    "cnt_late_dropped": 488,
+    "cnt_late_full": 492,
     "follow_name": 512,
     "follow_persist": 640,
     "expect_name": 768,
     "trig_queue": 896,
-    "persist_table": 2048
+    "persist_table": 2048,
+    "pup_table": 2560,
+    "seen_table": 3328
   },
   "layout_doc": {
     "magic": "u32 0x5846504F ('OFPX' little endian) set by the first hook that runs; 0 means no hook has run yet",
     "version": "u32, 2 for this layout",
-    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads, bit 3 = story triggers only near the hero (set: every trigger is applied at once, as upstream; queued ones are flushed)",
+    "disable": "u32 bit mask, a SET bit switches a feature off at run time; bit 0 = one-owner enemy rule, bit 1 = command mailbox, bit 2 = shared checkpoint loads, bit 3 = story triggers only near the hero (set: every trigger is applied at once, as upstream; queued ones are flushed), bit 4 = late copies of story enemies (set: an enemy born where a partner's enemy was born is only merged by the same-place rule)",
     "cnt_apply_calls": "u32 calls of the ApplySpawn hook",
     "cnt_send_calls": "u32 calls of the SendSpawn hook",
     "cnt_own_destroyed": "u32 times our own enemy was destroyed as a duplicate",
@@ -147,11 +153,17 @@
     "trig_pc": "u64 the controller the queue belongs to; another controller in the per-frame hook clears the queue",
     "cnt_trig_sent_pos": "u32 WORLD_TRIGGER_ACT packets sent with our position appended",
     "trig_count": "u32 entries in trig_queue (at most 6)",
+    "pup_count": "u32 entries in pup_table (at most 32)",
+    "seen_count": "u32 entries in seen_table (at most 64)",
+    "cnt_late_dropped": "u32 own enemies destroyed at birth as the late copy of a partner's enemy (patch v7)",
+    "cnt_late_full": "u32 times pup_table or seen_table stayed full after dropping gone entries (that enemy gets the old rule only)",
     "follow_name": "char[128]",
     "follow_persist": "char[128]",
     "expect_name": "char[128] the partner's load being executed here (echo guard)",
     "trig_queue": "6 entries of 192 bytes: u64 world channel, i32 sender, u32 type, i32 len, f32 x y z, the packet without the position tail (at most 160 bytes)",
-    "persist_table": "pairs 'checkpoint-name prefix NUL persistent level NUL', ends with an empty prefix; written into the file by the applier (data_init)"
+    "persist_table": "pairs 'checkpoint-name prefix NUL persistent level NUL', ends with an empty prefix; written into the file by the applier (data_init)",
+    "pup_table": "32 entries of 24 bytes: u64 puppet, f32 x y z of its spawn packet (its birth place), u32 pad; dropped on checkpoint loads and new controllers",
+    "seen_table": "64 x u64: our own enemies that have already passed the SendSpawn hook (an enemy not in it is new); dropped like pup_table"
   },
   "data_init": {
     "field": "persist_table",
