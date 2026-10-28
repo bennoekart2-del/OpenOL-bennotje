@@ -34,8 +34,14 @@
 #define F_TRIG_PC 0x1d0
 #define F_CNT_TRIG_SENT_POS 0x1d8
 #define F_TRIG_COUNT 0x1dc
+#define F_PUP_COUNT 0x1e0
+#define F_SEEN_COUNT 0x1e4
+#define F_CNT_LATE_DROPPED 0x1e8
+#define F_CNT_LATE_FULL 0x1ec
 #define F_FOLLOW_NAME 0x200
 #define F_FOLLOW_PERSIST 0x280
 #define F_EXPECT_NAME 0x300
 #define F_TRIG_QUEUE 0x380
 #define F_PERSIST_TABLE 0x800
+#define F_PUP_TABLE 0xa00
+#define F_SEEN_TABLE 0xd00

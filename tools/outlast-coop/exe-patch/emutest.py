@@ -1,4 +1,4 @@
-"""Game-free test of the trigger hooks of olfix.c (patch v6): runs the built code of olfix.json in a CPU emulator against fake game objects.
+"""Game-free test of the trigger hooks (patch v6) and the enemy hooks (one owner, late copies of patch v7) of olfix.c: runs the built code of olfix.json in a CPU emulator against fake game objects.
 
   pip install unicorn
   python -I emutest.py            prints one RESULT line per check and a SUMMARY; exit code 0 only when every check passes
@@ -20,12 +20,15 @@ IB = 0x140000000
 CAVE = int(CFG["section"]["cave_rva"], 16)
 DATA = IB + CAVE + int(CFG["section"]["data_offset"], 16)
 
-RVA = dict(sendbinary=0x174d9b0, tick=0x174f1d0, sngac=0x174e830, execcp=0x1707020, getgameinfo=0x0d214c0)
+RVA = dict(sendbinary=0x174d9b0, tick=0x174f1d0, sngac=0x174e830, execcp=0x1707020, getgameinfo=0x0d214c0, applyspawn=0x171eb00, destroyactor=0x08d7550)
+LOCALPLAYERID, SYNCENEMIES = 0x36b9a70, 0x36b9aec
+CH_CONTROLLER, CTRL_CACHED, CTRL_REMOTE, REMOTE_STRIDE, REMOTE_DUMMY, REMOTE_OWNER, OBJ_CLASS = 0x60, 0xe78, 0xeb8, 0x44, 0x10, 0x18, 0x50
 PC_HEROPAWN, ACTOR_LOC, PAWN_HEALTH = 0xa5c, 0x80, 0x37c
 CH_WORLD, TRIGGER_ACT, CHECKPOINT_LOAD = 5, 0x01, 0x11
 DISABLE_TRIGGER_NEAR = 8
+DISABLE_ONE_OWNER, DISABLE_LATE_COPY = 1, 16
 
-PEB, HEAP, STACK, DONE, ORIG_WORLD = 0x10000, 0x200000, 0x800000, 0x30000, 0x31000
+PEB, HEAP, STACK, DONE, ORIG_WORLD, ORIG_SENDSPAWN = 0x10000, 0x200000, 0x800000, 0x30000, 0x31000, 0x31100
 
 
 class Machine:
@@ -51,13 +54,13 @@ class Machine:
         mu.mem_write(DATA, bytes(area))
         self.calls = []
         self.stubs = {IB + RVA["sendbinary"]: "sendbinary", IB + RVA["tick"]: "tick", IB + RVA["sngac"]: "sngac",
-                      IB + RVA["execcp"]: "execcp", IB + RVA["getgameinfo"]: "getgameinfo", ORIG_WORLD: "orig_world"}
+                      IB + RVA["execcp"]: "execcp", IB + RVA["getgameinfo"]: "getgameinfo", ORIG_WORLD: "orig_world",
+                      IB + RVA["applyspawn"]: "applyspawn", IB + RVA["destroyactor"]: "destroyactor", ORIG_SENDSPAWN: "orig_sendspawn"}
         for a in self.stubs:
             mu.mem_write(a, b"\x31\xc0\xc3")                        # xor eax, eax; ret
-        mu.hook_add(UC_HOOK_CODE, self._stub, begin=ORIG_WORLD, end=ORIG_WORLD)
         for a in self.stubs:
-            if a != ORIG_WORLD:
-                mu.hook_add(UC_HOOK_CODE, self._stub, begin=a, end=a)
+            mu.hook_add(UC_HOOK_CODE, self._stub, begin=a, end=a)
+        self.next_puppet = None                                    # what the fake ApplySpawn makes: (controller, puppet, owner id)
         self.brk = HEAP
 
     def _stub(self, mu, addr, size, _):
@@ -70,6 +73,19 @@ class Machine:
             n = struct.unpack("<i", mu.mem_read(rsp + 0x28, 4))[0]
             self.calls.append((name, r(UC_X86_REG_RCX), r(UC_X86_REG_RDX) & 0xffffffff, r(UC_X86_REG_R8) & 0xffffffff,
                                bytes(mu.mem_read(r(UC_X86_REG_R9), n)) if n > 0 else b""))
+        elif name == "applyspawn":
+            ctrl, pup, owner = self.next_puppet
+            n = struct.unpack("<i", mu.mem_read(ctrl + CTRL_REMOTE + 8, 4))[0]
+            rem = struct.unpack("<Q", mu.mem_read(ctrl + CTRL_REMOTE, 8))[0]
+            r = rem + n * REMOTE_STRIDE
+            mu.mem_write(r + REMOTE_DUMMY, struct.pack("<Q", pup))
+            mu.mem_write(r + REMOTE_OWNER, struct.pack("<i", owner))
+            mu.mem_write(ctrl + CTRL_REMOTE + 8, struct.pack("<i", n + 1))
+            self.calls.append((name, pup))
+        elif name == "destroyactor":
+            self.calls.append((name, r(UC_X86_REG_RDX)))
+        elif name == "orig_sendspawn":
+            self.calls.append((name, r(UC_X86_REG_RDX)))
         else:
             self.calls.append((name,))
 
@@ -117,6 +133,36 @@ class Machine:
         self.mu.mem_write(ch, struct.pack("<Q", vt))
         return ch
 
+    # enemies: a multiplayer controller with CachedEnemies / RemoteEnemies, an enemy channel whose vtable +0x268 is the original SendSpawn
+    def enemy_world(self, my_id):
+        self.mu.mem_write(IB + LOCALPLAYERID, struct.pack("<i", my_id))
+        self.mu.mem_write(IB + SYNCENEMIES, struct.pack("<i", 1))
+        ctrl = self.alloc(0x1000)
+        self.mu.mem_write(ctrl + CTRL_CACHED, struct.pack("<Qi", self.alloc(8 * 128), 0))
+        self.mu.mem_write(ctrl + CTRL_REMOTE, struct.pack("<Qi", self.alloc(REMOTE_STRIDE * 128), 0))
+        vt = self.alloc(0x400)
+        self.mu.mem_write(vt + 0x268, struct.pack("<Q", ORIG_SENDSPAWN))
+        ch = self.alloc(0x100)
+        self.mu.mem_write(ch, struct.pack("<Q", vt))
+        self.mu.mem_write(ch + CH_CONTROLLER, struct.pack("<Q", ctrl))
+        return ctrl, ch
+
+    def enemy(self, cls, x, y, z=0.0, own_ctrl=None):
+        e = self.alloc(0x400)
+        self.mu.mem_write(e + OBJ_CLASS, struct.pack("<Q", cls))
+        self.mu.mem_write(e + PAWN_HEALTH, struct.pack("<i", 100))
+        self.move(e, x, y, z)
+        if own_ctrl:                                               # add to CachedEnemies
+            arr, n = struct.unpack("<Qi", self.mu.mem_read(own_ctrl + CTRL_CACHED, 12))
+            self.mu.mem_write(arr + 8 * n, struct.pack("<Q", e))
+            self.mu.mem_write(own_ctrl + CTRL_CACHED + 8, struct.pack("<i", n + 1))
+        return e
+
+    def drop_remote(self, ctrl, i):
+        """the owner deleted that enemy: its RemoteEnemies entry loses its puppet"""
+        rem = struct.unpack("<Q", self.mu.mem_read(ctrl + CTRL_REMOTE, 8))[0]
+        self.mu.mem_write(rem + i * REMOTE_STRIDE + REMOTE_DUMMY, struct.pack("<Q", 0))
+
     def packet(self, payload):
         a = self.alloc(len(payload) + 16)
         self.mu.mem_write(a, payload)
@@ -131,6 +177,26 @@ def trig_payload(path, count=0, pos=None):
 
 
 RESULTS = []
+
+
+def fbits(v):
+    return struct.unpack("<I", struct.pack("<f", v))[0]
+
+
+def spawn_packet(m, ch, ctrl, sender, cls, x, y, z=0.0):
+    """a partner's spawn packet: the fake ApplySpawn makes a puppet at (x, y, z); returns the puppet and the calls"""
+    pup = m.enemy(cls, x, y, z)
+    m.next_puppet = (ctrl, pup, sender)
+    m.calls.clear()
+    m.call("my_ApplySpawn", ch, sender, 0, 0, fbits(x), fbits(y), fbits(z), 0, 0, 0, 0, 0, 0, 0, 0)
+    return pup, list(m.calls)
+
+
+def send(m, ch, e):
+    """one TickSend step for our enemy e: True when it was announced, plus the actors destroyed"""
+    m.calls.clear()
+    m.call("my_SendSpawn", ch, e)
+    return any(c[0] == "orig_sendspawn" and c[1] == e for c in m.calls), [c[1] for c in m.calls if c[0] == "destroyactor"]
 
 
 def check(name, ok, detail=""):
@@ -237,9 +303,84 @@ def main():
     cp = world(m, ch, 1002, bytes([4]) + b"Lab_" + bytes([0]), type_=CHECKPOINT_LOAD)
     check("E17 the checkpoint packet (v5) still goes to the follow mailbox", cp == [] and m.u32("follow_pending") == 1)
 
+    enemy_checks()
+
     n_ok = sum(RESULTS)
     print(f"SUMMARY {n_ok}/{len(RESULTS)} PASS")
     sys.exit(0 if n_ok == len(RESULTS) else 1)
+
+
+def enemy_checks():
+    """L0 to L9: the one-owner rule and the late-copy rule (patch v7). We are player 2, the partner is player 1 (lower) or 3 (higher)."""
+    m = Machine()
+    ctrl, ch = m.enemy_world(2)
+    WALKER, PATIENT = 0x7000, 0x7100                               # two fake class pointers
+    S = (1000.0, 2000.0, 0.0)                                      # a spawn point of the story
+
+    # regression: the same-place rule of v1 (both copies born at the same moment)
+    own = m.enemy(WALKER, *S, own_ctrl=ctrl)
+    pup, _ = spawn_packet(m, ch, ctrl, 1, WALKER, *S)
+    ann, gone = send(m, ch, own)
+    check("L0 same place, lower owner: our copy is destroyed and not announced (v1 rule)", not ann and own in gone, f"{gone}")
+    m.drop_remote(ctrl, 0)
+
+    # the bug: the partner's copy was born at S long ago and has walked away; ours is born now at S
+    m.call("my_SNGAC", 0, 0, 0)                                    # a fresh world (also clears the late tables)
+    ctrl, ch = m.enemy_world(2)
+    pup, _ = spawn_packet(m, ch, ctrl, 3, WALKER, *S)              # partner (HIGHER id) announced its Walker at S
+    m.move(pup, 9000.0, 2000.0, 0.0)                               # ... and it chased them 80 m away
+    late = m.enemy(WALKER, *S, own_ctrl=ctrl)                      # our Kismet now spawns our own Walker at S
+    ann, gone = send(m, ch, late)
+    check("L1 a new enemy of ours born where a partner's copy was born is destroyed before it is announced (even though our id is lower)",
+          not ann and gone == [late] and m.u32("cnt_late_dropped") == 1, f"ann {ann} gone {gone}")
+    check("L2 ... and the partner's puppet is kept", pup not in gone)
+
+    old = m.enemy(WALKER, 5000.0, 5000.0, own_ctrl=ctrl)
+    ann1, _ = send(m, ch, old)
+    m.move(old, *S)
+    ann2, gone = send(m, ch, old)
+    check("L3 an enemy of ours seen before that walks past that birth place is kept", ann1 and ann2 and gone == [], f"{gone}")
+
+    other = m.enemy(PATIENT, *S, own_ctrl=ctrl)
+    ann, gone = send(m, ch, other)
+    check("L4 a new enemy of another class at that birth place is kept", ann and gone == [])
+
+    fresh = m.enemy(WALKER, -7000.0, 0.0, own_ctrl=ctrl)
+    ann, gone = send(m, ch, fresh)
+    check("L5 a new enemy born elsewhere is kept", ann and gone == [])
+
+    m.set_u32("disable", DISABLE_LATE_COPY)
+    late2 = m.enemy(WALKER, *S, own_ctrl=ctrl)
+    ann, gone = send(m, ch, late2)
+    check("L6 twin: with bit 4 set the late copy is kept (v6 behaviour, the duplicate)", ann and gone == [])
+    m.set_u32("disable", DISABLE_ONE_OWNER)
+    late3 = m.enemy(WALKER, *S, own_ctrl=ctrl)
+    ann, gone = send(m, ch, late3)
+    check("L7 bit 0 (the whole one-owner rule off) also switches the late rule off", ann and gone == [])
+    m.set_u32("disable", 0)
+
+    m.drop_remote(ctrl, 0)                                         # the partner's Walker died / was deleted
+    late4 = m.enemy(WALKER, *S, own_ctrl=ctrl)
+    ann, gone = send(m, ch, late4)
+    check("L8 once the partner's copy is gone, a new enemy at its birth place is kept", ann and gone == [])
+
+    pup2, _ = spawn_packet(m, ch, ctrl, 3, PATIENT, -3000.0, 0.0)
+    m.move(pup2, 0.0, 0.0, 0.0)
+    m.call("my_SNGAC", 0, 0, 0)
+    check("L9 a checkpoint load drops both tables", m.u32("pup_count") == 0 and m.u32("seen_count") == 0)
+
+    # full tables: gone puppets are dropped to make room
+    m2 = Machine()
+    c2, h2 = m2.enemy_world(2)
+    for i in range(32):
+        spawn_packet(m2, h2, c2, 3, PATIENT, 100.0 * i, 50000.0)
+    for i in range(32):
+        m2.drop_remote(c2, i)
+    pw, _ = spawn_packet(m2, h2, c2, 3, WALKER, *S)
+    m2.move(pw, 9000.0, 0.0, 0.0)
+    e2 = m2.enemy(WALKER, *S, own_ctrl=c2)
+    ann, gone = send(m2, h2, e2)
+    check("L10 a full birth-place table makes room by dropping gone puppets", not ann and gone == [e2] and m2.u32("pup_count") == 1, f"count {m2.u32('pup_count')}")
 
 
 if __name__ == "__main__":

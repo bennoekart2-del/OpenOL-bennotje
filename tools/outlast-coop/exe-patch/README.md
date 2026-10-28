@@ -36,7 +36,7 @@ python -I apply_patch.py <game copy>\Binaries\Win64\OLGame.exe OLGame_patched.ex
 | A4b the same when the higher id loads first | PASS | XFAIL, 1 spot sent by both |
 | A4c both game processes alive after the handover | PASS | PASS |
 
-Not tested yet: a scripted story enemy that the story waits for (the destroyed copy may stall a script on the higher-id client), enemies of one class
+Not tested yet (see also patch v7 at the end: story enemies born at different times): a scripted story enemy that the story waits for (the destroyed copy may stall a script on the higher-id client), enemies of one class
 standing closer than 150 units to each other, three players, two PCs.
 
 ## Patch tooling (v2 layout)
@@ -94,3 +94,29 @@ Tests:
 
 Limits: the position is where the sender stood when it touched the trigger, not the trigger volume itself (a very large volume needs a larger radius). Two players who both pass
 a one-shot trigger each fire it themselves; the queued copy then finds it used up and does nothing (the original `MaxTriggerCount` check).
+
+## Late copies of story enemies (patch v7)
+
+The gap in the one-owner rule: it only merges two copies that stand within 150 units of each other. Map enemies are loaded by both clients at the same
+place, so that works. Story enemies (Chris Walker, the chase scenes) are spawned by each client's own Kismet when **that** client's player reaches the
+trigger, so the two copies can be born seconds or minutes apart; with v6 the partner's copy of a far trigger even waits until the partner is near on purpose.
+By then the first copy has run off after a player, the second one is born at the spawn point, they are more than 150 units apart and both stay: two Walkers,
+until (if ever) they happen to walk within 150 units of each other.
+
+The rule added: `my_ApplySpawn` remembers where every puppet was born (the position in its spawn packet, `pup_table`), and `my_SendSpawn` remembers which of our
+own enemies it has seen (`seen_table`). An enemy of ours that `my_SendSpawn` sees for the **first** time, of the same class as a live puppet and within 150 units
+of that puppet's birth place, is the late copy of the partner's enemy: it is destroyed before it is announced, whatever the player ids (the partner's copy is
+already playing the scene, so it stays). Both tables are dropped on every checkpoint load and on a new controller; a table that stays full after dropping gone
+entries leaves that enemy to the old rule only (`cnt_late_full`). Kill switch: `disable` bit 4 (`harness/olmail.py <pid> disable late`); bit 0 switches it off too.
+Counter: `cnt_late_dropped`.
+
+Limits: the late client's Kismet loses its own copy, the same risk as the v1 rule (a script that waits for that enemy may stall there; not seen yet, not tested
+in-game). Two **different** enemies of one class born at the same spot while the first is still alive on the partner's side would be merged by mistake.
+An enemy whose spawn packet was a re-announcement (after a load race) has its current position, not its birth place, as "birth place": that pair falls back to
+the old rule.
+
+Tests: `emutest.py` L0 to L10 (game-free): v1 regression, the late copy dropped even with the lower id, the puppet kept, a seen enemy walking past the birth
+place kept, another class kept, a new enemy elsewhere kept, twins with bit 4 and bit 0 set (the duplicate comes back), a gone puppet no longer counts,
+checkpoint load clears, a full table makes room. 29/29 PASS together with E0 to E17. `selftest.py` on the real OpenOL 2.1.0 exe 21/21 PASS, output SHA-256
+`52392a32...`. **Not tested in-game yet**: watch `cnt_late_dropped` with `olmail.py` during a Walker scene where one player arrives a while after the other.
+

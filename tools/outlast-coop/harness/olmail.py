@@ -1,7 +1,7 @@
 """Host side of the patch's data area (see exe-patch/sites.json "layout"): read the counters and set the kill switch of a running client.
 
   python -I olmail.py <pid> [<pid> ...]                 print the data area of each client
-  python -I olmail.py <pid> disable one_owner|triggers|none   set a kill switch (a twin without swapping exes): the one-owner rule or the trigger distance rule
+  python -I olmail.py <pid> disable one_owner|triggers|late|none   set a kill switch (a twin without swapping exes): the one-owner rule, the trigger distance rule or the late-copy rule
   python -I olmail.py <pid> radius <units>             set the trigger distance rule's radius (0 = the default 3000)
   python -I olmail.py <pid> load <checkpoint> [<persistent level>]   load a checkpoint through the patch's mailbox (no mouse, no overlay)
 
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     if len(a) >= 3 and a[1] == "load":
         print(send_load(int(a[0]), a[2], a[3] if len(a) > 3 else ""))
     elif len(a) == 3 and a[1] == "disable":
-        ok = set_disable(int(a[0]), {"one_owner": 1, "triggers": 8, "none": 0}[a[2]])
+        ok = set_disable(int(a[0]), {"one_owner": 1, "triggers": 8, "late": 16, "none": 0}[a[2]])
         print("written" if ok else "write failed")
     elif len(a) == 3 and a[1] == "radius":
         print("written" if set_radius(int(a[0]), float(a[2])) else "write failed")
